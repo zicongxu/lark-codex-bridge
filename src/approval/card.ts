@@ -19,15 +19,23 @@ export function approvalRequestCard(approval: PendingApproval): object {
     elements: [
       divMd(
         [
-          'Codex 的命令在沙箱里失败了。确认后，bridge 会在本机直接执行下面这条命令，并把结果回传给当前会话。',
+          '**状态**: 等待管理员确认',
           '',
-          `**cwd**: \`${code(approval.cwd, 1000)}\``,
-          `**reason**: ${approval.reason}`,
+          'Codex 在沙箱里执行失败。确认后，bridge 会在本机宿主环境执行同一条命令，并把 stdout/stderr 回传给当前会话。',
+          '',
+          `**工作目录**: \`${code(approval.cwd, 1000)}\``,
+          '',
+          '**失败摘要**:',
+          '```text',
+          code(approval.reason, 1200),
+          '```',
           '',
           '**command**:',
           '```bash',
           code(approval.command),
           '```',
+          '',
+          '_只批准你能识别的命令；本次授权不会持久化。_',
         ].join('\n'),
       ),
       {
@@ -55,7 +63,7 @@ export function approvalRunningCard(approval: PendingApproval): object {
     title: '正在跳出沙箱执行',
     template: 'blue',
     approval,
-    status: '已确认，bridge 正在本机执行该命令。执行期间按钮已失效。',
+    status: '已确认，bridge 正在本机执行该命令。\n\n执行期间按钮已失效，完成后结果会自动回传。',
     buttonText: '执行中',
   });
 }
@@ -97,7 +105,7 @@ export function approvalFinishedCard(
       `signal: \`${result.signal ?? '(none)'}\``,
       `timedOut: \`${result.timedOut ? 'true' : 'false'}\``,
       '',
-      '执行结果已回传给 Codex 会话。',
+      ok ? '执行完成，结果已回传给 Codex 会话。' : '执行结束但未完全成功，结果已回传给 Codex 会话。',
     ].join('\n'),
     buttonText: '已完成',
   });
@@ -121,7 +129,7 @@ function approvalStatusCard(opts: {
         [
           opts.status,
           '',
-          `**cwd**: \`${code(opts.approval.cwd, 1000)}\``,
+          `**工作目录**: \`${code(opts.approval.cwd, 1000)}\``,
           '',
           '**command**:',
           '```bash',

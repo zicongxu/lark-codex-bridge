@@ -1,4 +1,5 @@
 import type { Block, FooterStatus, RunState, ToolEntry } from './run-state';
+import { polishAssistantMarkdown } from './markdown-polish';
 import { toolBodyMd, toolHeaderText } from './tool-render';
 
 const REASONING_MAX = 1500;
@@ -16,18 +17,24 @@ type Group = ToolGroup | TextGroup;
 
 export function renderCard(state: RunState): object {
   const elements: object[] = [];
+  let renderedContent = false;
+
+  elements.push(statusBanner(state));
 
   if (state.reasoning.content) {
     elements.push(reasoningPanel(state.reasoning.content, state.reasoning.active));
+    renderedContent = true;
   }
 
   for (const group of groupBlocks(state.blocks)) {
     if (group.kind === 'text') {
       if (group.content.trim()) {
-        elements.push(markdown(group.content));
+        elements.push(markdown(polishAssistantMarkdown(group.content)));
+        renderedContent = true;
       }
     } else {
       elements.push(...renderToolGroup(group.tools, state.terminal !== 'running'));
+      renderedContent = true;
     }
   }
 
@@ -38,7 +45,7 @@ export function renderCard(state: RunState): object {
     elements.push(noteMd(`_⏱ ${mins} 分钟无响应,已自动终止_`));
   } else if (state.terminal === 'error' && state.errorMsg) {
     elements.push(noteMd(`⚠️ agent 失败：${state.errorMsg}`));
-  } else if (state.terminal === 'done' && elements.length === 0) {
+  } else if (state.terminal === 'done' && !renderedContent) {
     elements.push(noteMd('_（未返回内容）_'));
   }
 
@@ -91,7 +98,7 @@ function renderToolGroup(tools: ToolEntry[], finalized: boolean): object[] {
 }
 
 function reasoningPanel(content: string, active: boolean): object {
-  const title = active ? '🧠 **思考中**' : '🧠 **思考完成，点击查看**';
+  const title = active ? '🧠 **正在梳理**' : '🧠 **思考过程**';
   return collapsiblePanel({
     title,
     expanded: active,
@@ -123,7 +130,7 @@ function toolPanel(tool: ToolEntry, expanded: boolean): object {
  */
 function collapsedToolSummary(tools: ToolEntry[], finalized: boolean): object {
   const suffix = finalized ? '（已结束）' : '';
-  const title = `☕ **${tools.length} 个工具调用${suffix}**`;
+  const title = `🧰 **工具轨迹 · ${tools.length} 次${suffix}**`;
   const headerList = tools.map((t) => `- ${toolHeaderText(t)}`).join('\n');
   return {
     tag: 'collapsible_panel',
@@ -173,6 +180,24 @@ function noteMd(content: string): object {
   return { tag: 'markdown', content, text_size: 'notation' };
 }
 
+function statusBanner(state: RunState): object {
+  return {
+    tag: 'markdown',
+    content: statusBannerText(state),
+    text_size: 'notation',
+  };
+}
+
+function statusBannerText(state: RunState): string {
+  if (state.terminal === 'done') return '✅ **已完成** · 结果整理好了';
+  if (state.terminal === 'interrupted') return '⏹ **已中断** · 本轮执行已停止';
+  if (state.terminal === 'idle_timeout') return '⏱ **已超时** · 长时间无响应，已自动终止';
+  if (state.terminal === 'error') return '⚠️ **出错了** · 我把失败点放在下面';
+  if (state.footer === 'tool_running') return '🧰 **执行中** · 正在跑工具，稍等我回看结果';
+  if (state.footer === 'streaming') return '✍️ **整理中** · 正在把结果写出来';
+  return '🧠 **思考中** · 我在拆解问题';
+}
+
 function stopButton(): object {
   return {
     tag: 'button',
@@ -185,10 +210,10 @@ function stopButton(): object {
 function footerStatus(status: Exclude<FooterStatus, null>): object {
   const text =
     status === 'thinking'
-      ? '🧠 正在思考'
+      ? '🧠 正在拆解问题…'
       : status === 'tool_running'
-        ? '🧰 正在调用工具'
-        : '✍️ 正在输出';
+        ? '🧰 正在调用工具…'
+        : '✍️ 正在整理输出…';
   return noteMd(text);
 }
 

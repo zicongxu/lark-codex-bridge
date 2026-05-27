@@ -1,4 +1,5 @@
 import type { Block, RunState, ToolEntry } from './run-state';
+import { polishAssistantMarkdown } from './markdown-polish';
 import { toolHeaderText } from './tool-render';
 
 /**
@@ -35,7 +36,7 @@ export function renderText(state: RunState): string {
 
 function renderBlock(block: Block): string {
   if (block.kind === 'text') {
-    return block.content.trim();
+    return polishAssistantMarkdown(block.content);
   }
   return toolLine(block.tool);
 }
@@ -51,7 +52,7 @@ function toolLine(tool: ToolEntry): string {
 }
 
 function footerLine(status: 'thinking' | 'tool_running' | 'streaming'): string {
-  if (status === 'thinking') return '_🧠 正在思考…_';
-  if (status === 'tool_running') return '_🧰 正在调用工具…_';
-  return '_✍️ 正在输出…_';
+  if (status === 'thinking') return '_🧠 正在拆解问题…_';
+  if (status === 'tool_running') return '_🧰 正在跑工具，稍等我回看结果…_';
+  return '_✍️ 正在整理输出…_';
 }

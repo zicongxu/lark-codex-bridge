@@ -14,8 +14,9 @@ const BODY_TOTAL_MAX = 2500;
 
 export function toolHeaderText(tool: ToolEntry): string {
   const icon = tool.status === 'done' ? '✅' : tool.status === 'error' ? '❌' : '⏳';
+  const label = toolDisplayName(tool.name);
   const summary = summarizeInput(tool.name, tool.input);
-  return summary ? `${icon} **${tool.name}** — ${summary}` : `${icon} **${tool.name}**`;
+  return summary ? `${icon} **${label}** — ${summary}` : `${icon} **${label}**`;
 }
 
 export function toolBodyMd(tool: ToolEntry): string {
@@ -27,7 +28,7 @@ export function toolBodyMd(tool: ToolEntry): string {
     const truncated = truncate(tool.output, OUTPUT_MAX);
     if (tool.status === 'error') {
       parts.push(`**Error**\n\`\`\`\n${truncated}\n\`\`\``);
-    } else if (tool.name === 'Bash') {
+    } else if (isCommandTool(tool.name)) {
       parts.push(renderBashOutput(truncated));
     } else {
       parts.push(`**Output**\n\`\`\`\n${truncated}\n\`\`\``);
@@ -52,6 +53,8 @@ function summarizeInput(name: string, input: unknown): string {
   };
   switch (name) {
     case 'Bash':
+    case 'command':
+    case 'exec_command':
       return pick('command');
     case 'Read':
     case 'Edit':
@@ -85,8 +88,15 @@ function renderInput(tool: ToolEntry): string {
 
   switch (tool.name) {
     case 'Bash': {
+      return renderCommandInput(str('command'));
+    }
+    case 'command':
+    case 'exec_command': {
+      return renderCommandInput(str('command'));
+    }
+    case 'exec': {
       const cmd = str('command');
-      return cmd ? `**Command**\n\`\`\`bash\n${truncate(cmd, BODY_FIELD_MAX)}\n\`\`\`` : '';
+      return renderCommandInput(cmd);
     }
     case 'Read':
     case 'Edit':
@@ -110,9 +120,46 @@ function renderInput(tool: ToolEntry): string {
   }
 }
 
+function renderCommandInput(cmd: string): string {
+  return cmd ? `**Command**\n\`\`\`bash\n${truncate(cmd, BODY_FIELD_MAX)}\n\`\`\`` : '';
+}
+
 function renderBashOutput(out: string): string {
   // Some agents wrap stdout/stderr in xml-like tags; keep simple and just dump.
   return `**Output**\n\`\`\`\n${out}\n\`\`\``;
+}
+
+function isCommandTool(name: string): boolean {
+  return name === 'Bash' || name === 'command' || name === 'exec_command' || name === 'exec';
+}
+
+function toolDisplayName(name: string): string {
+  switch (name) {
+    case 'Bash':
+    case 'command':
+    case 'exec':
+    case 'exec_command':
+      return '命令';
+    case 'Read':
+      return '读取';
+    case 'Edit':
+      return '编辑';
+    case 'Write':
+      return '写入';
+    case 'Grep':
+      return '搜索';
+    case 'Glob':
+      return '匹配文件';
+    case 'WebFetch':
+      return '读取网页';
+    case 'WebSearch':
+      return '网页搜索';
+    case 'Agent':
+    case 'Task':
+      return '子任务';
+    default:
+      return name;
+  }
 }
 
 function shortenPath(p: string): string {
