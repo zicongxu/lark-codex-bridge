@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { userInfo } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { dirname } from 'node:path';
 import {
   LAUNCH_AGENT_LABEL,
@@ -20,6 +20,8 @@ export interface PlistInputs {
    * tools (lark-cli, codex) can be resolved by name. launchd defaults
    * to a very minimal PATH otherwise. */
   envPath: string;
+  /** Stable process cwd for the daemon. launchd otherwise starts jobs at `/`. */
+  workingDirectory: string;
 }
 
 export function buildPlist(inputs: PlistInputs): string {
@@ -41,6 +43,8 @@ export function buildPlist(inputs: PlistInputs): string {
         <string>${escape(inputs.bridgeEntryPath)}</string>
         <string>run</string>
     </array>
+    <key>WorkingDirectory</key>
+    <string>${escape(inputs.workingDirectory)}</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -68,6 +72,7 @@ export async function writePlist(): Promise<void> {
     nodePath: process.execPath,
     bridgeEntryPath,
     envPath: process.env.PATH ?? '',
+    workingDirectory: process.env.FEISHU_CODEX_WORKSPACE_ROOT ?? homedir(),
   });
   const plistPath = launchAgentPlistPath();
   await mkdir(dirname(plistPath), { recursive: true });

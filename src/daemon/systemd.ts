@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { dirname } from 'node:path';
 import {
   SYSTEMD_UNIT_NAME,
@@ -19,6 +20,8 @@ export interface UnitInputs {
    * tools (lark-cli, codex) can be resolved by name. systemd user units
    * inherit a minimal env otherwise. */
   envPath: string;
+  /** Stable process cwd for the daemon. */
+  workingDirectory: string;
 }
 
 /**
@@ -44,6 +47,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart="${escape(inputs.nodePath)}" "${escape(inputs.bridgeEntryPath)}" run
+WorkingDirectory="${escape(inputs.workingDirectory)}"
 Restart=always
 RestartSec=5
 StandardOutput=append:${daemonStdoutPath()}
@@ -64,6 +68,7 @@ export async function writeUnit(): Promise<void> {
     nodePath: process.execPath,
     bridgeEntryPath,
     envPath: process.env.PATH ?? '',
+    workingDirectory: process.env.FEISHU_CODEX_WORKSPACE_ROOT ?? homedir(),
   });
   const unitPath = systemdUnitPath();
   await mkdir(dirname(unitPath), { recursive: true });

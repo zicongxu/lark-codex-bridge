@@ -172,12 +172,27 @@ Important environment variables:
 | `FEISHU_CODEX_BRIDGE_PROXY` | Optional proxy used by the Windows helper script. |
 | `HTTP_PROXY` / `HTTPS_PROXY` | Optional network proxy inherited by Node and Codex child processes. |
 
+### Sandbox Escape Approval
+
+When `/config` sets `Codex file permission` to `acceptEdits`, Codex runs in
+`workspace-write`: it can edit the current workspace, but writes outside the
+workspace still fail in the Codex sandbox. If a command fails with a sandbox-like
+permission error, the bridge sends an approval card to the same chat.
+
+Only `/config` admins may click **Allow once**. After approval, the bridge runs
+the exact failed shell command on the host, outside the Codex sandbox, then
+queues the command result back into the same Codex session as a follow-up
+message. The host-side execution has a 30-minute timeout. The approval is
+one-time and expires from memory; it is not persisted across bridge restarts.
+
 ## Security Notes
 
 - Never commit App Secret, OpenAI/Codex login state, cookies, or `~/.feishu-codex-bridge`.
 - Restrict `FEISHU_CODEX_WORKSPACE_ROOT` to the smallest directory tree the bot should access.
 - Set `/config` admins before inviting the bot into shared groups.
 - In groups, keep "require mention" enabled unless you deliberately want all group messages sent to Codex.
+- Treat sandbox escape approvals as local shell access. Only approve commands
+  you recognize and only in trusted chats.
 - `/doctor` sanitizes logs before sending them to Codex, but logs may still contain operational metadata. Use it in trusted chats.
 
 ## Development

@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -105,5 +105,71 @@ describe('slash commands', () => {
       expect.objectContaining({ markdown: '已开始新会话。' }),
       { replyTo: 'om_msg' },
     );
+  });
+
+  it('treats plain cd as a workspace switch command', async () => {
+    const target = process.cwd();
+    const { ctx, sessions, workspaces, send } = await makeContext(`cd ${target}`);
+    sessions.set(ctx.scope, 'thread-1', '/Users/bytedance');
+
+    await expect(tryHandleCommand(ctx)).resolves.toBe(true);
+
+    expect(workspaces.cwdFor(ctx.scope)).toBe(target);
+    expect(sessions.getRaw(ctx.scope)).toBeUndefined();
+    expect(send).toHaveBeenCalledWith(
+      'oc_source_chat',
+      expect.objectContaining({ markdown: expect.stringContaining('已切换 cwd') }),
+      { replyTo: 'om_msg' },
+    );
+  });
+
+  it('treats Chinese directory-switch phrasing as a workspace switch command', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'feishu-codex-bridge-root-'));
+    const target = join(root, 'project');
+    await mkdir(target);
+    const originalRoot = process.env.FEISHU_CODEX_WORKSPACE_ROOT;
+    process.env.FEISHU_CODEX_WORKSPACE_ROOT = root;
+    try {
+      const { ctx, sessions, workspaces, send } = await makeContext(`进入目录：${target}`);
+      sessions.set(ctx.scope, 'thread-1', root);
+
+      await expect(tryHandleCommand(ctx)).resolves.toBe(true);
+
+      expect(workspaces.cwdFor(ctx.scope)).toBe(target);
+      expect(sessions.getRaw(ctx.scope)).toBeUndefined();
+      expect(send).toHaveBeenCalledWith(
+        'oc_source_chat',
+        expect.objectContaining({ markdown: expect.stringContaining('已切换 cwd') }),
+        { replyTo: 'om_msg' },
+      );
+    } finally {
+      if (originalRoot === undefined) {
+        delete process.env.FEISHU_CODEX_WORKSPACE_ROOT;
+      } else {
+        process.env.FEISHU_CODEX_WORKSPACE_ROOT = originalRoot;
+      }
+    }
+  });
+
+  it('persists cd before replying so daemon restarts keep the cwd', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'feishu-codex-bridge-root-'));
+    const target = join(root, 'project');
+    await mkdir(target);
+    const originalRoot = process.env.FEISHU_CODEX_WORKSPACE_ROOT;
+    process.env.FEISHU_CODEX_WORKSPACE_ROOT = root;
+    try {
+      const { ctx } = await makeContext(`cd ${target}`);
+      const storePath = (ctx.workspaces as unknown as { path: string }).path;
+
+      await expect(tryHandleCommand(ctx)).resolves.toBe(true);
+
+      await expect(readFile(storePath, 'utf8')).resolves.toContain(target);
+    } finally {
+      if (originalRoot === undefined) {
+        delete process.env.FEISHU_CODEX_WORKSPACE_ROOT;
+      } else {
+        process.env.FEISHU_CODEX_WORKSPACE_ROOT = originalRoot;
+      }
+    }
   });
 });

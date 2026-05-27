@@ -131,10 +131,11 @@ function isAdminCommand(cmd: string): boolean {
 
 export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
   const trimmed = ctx.msg.content.trim();
-  if (!trimmed.startsWith('/')) return false;
+  const naturalCd = parseNaturalCd(trimmed);
+  if (!trimmed.startsWith('/') && !naturalCd) return false;
   const parts = trimmed.split(/\s+/);
-  const cmd = parts[0] ?? '';
-  const args = parts.slice(1).join(' ');
+  const cmd = naturalCd ? '/cd' : parts[0] ?? '';
+  const args = naturalCd ?? parts.slice(1).join(' ');
   const h = handlers[cmd];
   if (!h) return false;
   if (isAdminCommand(cmd) && !isAdmin(ctx.controls.cfg, ctx.msg.senderId)) {
@@ -151,6 +152,19 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
     log.fail('command', err, { cmd });
   }
   return true;
+}
+
+function parseNaturalCd(input: string): string | undefined {
+  const patterns = [
+    /^cd\s+(.+)$/i,
+    /^(?:进入|进去|切到|切换到|转到|到)\s*(?:目录|文件夹|路径)?\s*[:：]?\s*(.+)$/,
+  ];
+  for (const pattern of patterns) {
+    const match = input.match(pattern);
+    const value = match?.[1]?.trim();
+    if (value) return value;
+  }
+  return undefined;
 }
 
 /** Invoke a named command handler (e.g. from a card button click). */
@@ -280,6 +294,7 @@ async function handleCd(args: string, ctx: CommandContext): Promise<void> {
   ctx.activeRuns.interrupt(ctx.scope);
   ctx.workspaces.setCwd(ctx.scope, absolute);
   ctx.sessions.clear(ctx.scope);
+  await Promise.all([ctx.workspaces.flush(), ctx.sessions.flush()]);
   await reply(ctx, `✓ 已切换 cwd 到 \`${absolute}\`\n（session 已重置）`);
 }
 

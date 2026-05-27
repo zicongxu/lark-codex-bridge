@@ -4,8 +4,8 @@ export type AgentEvent =
   | { type: 'system'; sessionId?: string; cwd?: string; model?: string }
   | { type: 'text'; delta: string }
   | { type: 'thinking'; delta: string }
-  | { type: 'tool_use'; id: string; name: string; input: unknown }
-  | { type: 'tool_result'; id: string; output: string; isError: boolean }
+  | { type: 'tool_use'; id: string; name: string; input: unknown; cwd?: string }
+  | { type: 'tool_result'; id: string; output: string; isError: boolean; cwd?: string }
   | { type: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number }
   | { type: 'done'; sessionId?: string }
   | { type: 'error'; message: string };

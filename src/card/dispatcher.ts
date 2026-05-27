@@ -1,10 +1,19 @@
 import type { CardActionEvent, LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
+import {
+  approvalDeniedCard,
+  approvalExpiredCard,
+  approvalFinishedCard,
+  approvalRunningCard,
+} from '../approval/card';
+import { executeApprovedCommand } from '../approval/execute';
+import type { PendingApproval } from '../approval/store';
+import { consumeApproval, denyApproval, finishApproval, getApproval } from '../approval/store';
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { ChatModeCache } from '../bot/chat-mode-cache';
 import type { PendingQueue } from '../bot/pending-queue';
 import { runCommandHandler, type CommandContext, type Controls } from '../commands';
-import { isChatAllowed, isUserAllowed } from '../config/schema';
+import { isAdmin, isChatAllowed, isUserAllowed } from '../config/schema';
 import { log } from '../core/logger';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
@@ -16,6 +25,12 @@ import type { WorkspaceStore } from '../workspace/store';
  * fields the agent might set.
  */
 const AGENT_CALLBACK_MARKER = '__codex_cb';
+const APPROVAL_SETTLE_MS = 1500;
+const FALLBACK_APPROVAL_RESULT = { exitCode: null, signal: null, timedOut: false } satisfies NonNullable<
+  PendingApproval['result']
+>;
+
+const approvalRefreshTimers = new Map<string, NodeJS.Timeout>();
 
 export interface CardDispatchDeps {
   channel: LarkChannel;
@@ -103,11 +118,252 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   const args = composeArgs(sub, payload);
 
   try {
+    if (name === 'approval') {
+      await handleApprovalAction(deps, sub, payload, scope, threadId, mode);
+      return;
+    }
     const ok = await runCommandHandler(name ?? '', args, ctx);
     if (!ok) log.warn('cardAction', 'unknown', { cmd });
   } catch (err) {
     log.fail('cardAction', err, { cmd });
   }
+}
+
+async function handleApprovalAction(
+  deps: CardDispatchDeps,
+  action: string,
+  payload: Record<string, unknown>,
+  scope: string,
+  threadId: string | undefined,
+  mode: 'p2p' | 'group' | 'topic',
+): Promise<void> {
+  const id = typeof payload.id === 'string' ? payload.id : '';
+  if (!id) return;
+  if (!isAdmin(deps.controls.cfg, deps.evt.operator.openId)) {
+    await deps.channel.send(
+      deps.evt.chatId,
+      { text: '只有管理员可以确认跳出沙箱执行。' },
+      { replyTo: deps.evt.messageId, ...(mode === 'topic' && threadId ? { replyInThread: true } : {}) },
+    );
+    return;
+  }
+
+  if (action === 'deny') {
+    const approval = denyApproval(id);
+    if (!approval) {
+      updateAlreadyHandledApproval(deps, id, cardMessageId(deps));
+      return;
+    }
+    const messageId = approval.messageId || cardMessageId(deps);
+    scheduleApprovalCardRefresh(deps, approval.id, messageId);
+    deps.pending.push(
+      approval.scope,
+      syntheticApprovalMessage(deps, approval.threadId ?? threadId, approval.command, 'denied'),
+    );
+    return;
+  }
+
+  if (action !== 'allow') return;
+  const approval = consumeApproval(id);
+  if (!approval) {
+    updateAlreadyHandledApproval(deps, id, cardMessageId(deps));
+    return;
+  }
+  const messageId = approval.messageId || cardMessageId(deps);
+  scheduleApprovalCardRefresh(deps, approval.id, messageId);
+
+  void executeApprovalInBackground(deps, approval, threadId, messageId);
+}
+
+async function executeApprovalInBackground(
+  deps: CardDispatchDeps,
+  approval: PendingApproval,
+  threadId: string | undefined,
+  messageId: string,
+): Promise<void> {
+  log.warn('approval', 'execute-start', {
+    scope: approval.scope,
+    approvalId: approval.id,
+    cwd: approval.cwd,
+    command: approval.command.slice(0, 300),
+  });
+  try {
+    const result = await executeApprovedCommand(approval.command, approval.cwd);
+    log.warn('approval', 'execute-end', {
+      scope: approval.scope,
+      approvalId: approval.id,
+      exitCode: result.exitCode,
+      signal: result.signal,
+      timedOut: result.timedOut,
+      stdoutChars: result.stdout.length,
+      stderrChars: result.stderr.length,
+    });
+    finishApproval(approval.id, {
+      exitCode: result.exitCode,
+      signal: result.signal,
+      timedOut: result.timedOut,
+    });
+    scheduleApprovalCardRefresh(deps, approval.id, messageId);
+    deps.pending.push(
+      approval.scope,
+      syntheticApprovalMessage(
+        deps,
+        approval.threadId ?? threadId,
+        approval.command,
+        'allowed',
+        [
+          `exitCode: ${result.exitCode ?? '(none)'}`,
+          `signal: ${result.signal ?? '(none)'}`,
+          `timedOut: ${result.timedOut ? 'true' : 'false'}`,
+          '',
+          '<stdout>',
+          result.stdout || '(empty)',
+          '</stdout>',
+          '',
+          '<stderr>',
+          result.stderr || '(empty)',
+          '</stderr>',
+        ].join('\n'),
+      ),
+    );
+  } catch (err) {
+    log.fail('approval', err, { approvalId: approval.id, phase: 'execute-background' });
+    finishApproval(approval.id, FALLBACK_APPROVAL_RESULT);
+    scheduleApprovalCardRefresh(deps, approval.id, messageId);
+    deps.pending.push(
+      approval.scope,
+      syntheticApprovalMessage(
+        deps,
+        approval.threadId ?? threadId,
+        approval.command,
+        'allowed',
+        `bridge approval executor failed: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    );
+  }
+}
+
+async function updateAlreadyHandledApproval(
+  deps: CardDispatchDeps,
+  id: string,
+  messageId: string,
+): Promise<void> {
+  const existing = getApproval(id);
+  const targetMessageId = existing?.messageId || messageId;
+  scheduleApprovalCardRefresh(deps, id, targetMessageId);
+}
+
+function scheduleApprovalCardRefresh(
+  deps: CardDispatchDeps,
+  approvalId: string,
+  messageId: string,
+  delayMs = APPROVAL_SETTLE_MS,
+): void {
+  const existing = approvalRefreshTimers.get(approvalId);
+  if (existing) clearTimeout(existing);
+
+  const timer = setTimeout(() => {
+    approvalRefreshTimers.delete(approvalId);
+    void refreshApprovalCard(deps, approvalId, messageId).catch((err) => {
+      log.warn('approval', 'card-refresh-failed', {
+        approvalId,
+        messageId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, delayMs);
+  approvalRefreshTimers.set(approvalId, timer);
+}
+
+async function refreshApprovalCard(
+  deps: CardDispatchDeps,
+  approvalId: string,
+  messageId: string,
+): Promise<void> {
+  const approval = getApproval(approvalId);
+  if (!approval) {
+    await updateApprovalCard(deps.channel, messageId, approvalExpiredCard());
+    return;
+  }
+
+  const targetMessageId = approval.messageId || messageId;
+  if (approval.status === 'running') {
+    await updateApprovalCard(deps.channel, targetMessageId, approvalRunningCard(approval));
+    return;
+  }
+  if (approval.status === 'denied') {
+    await updateApprovalCard(deps.channel, targetMessageId, approvalDeniedCard(approval));
+    return;
+  }
+  if (approval.status === 'finished') {
+    await updateApprovalCard(
+      deps.channel,
+      targetMessageId,
+      approvalFinishedCard(approval, approval.result ?? FALLBACK_APPROVAL_RESULT),
+    );
+    return;
+  }
+  await updateApprovalCard(deps.channel, targetMessageId, approvalExpiredCard());
+}
+
+function cardMessageId(deps: CardDispatchDeps): string {
+  const raw = (deps.evt as CardActionEvent & { raw?: unknown }).raw as
+    | { context?: { open_message_id?: unknown }; open_message_id?: unknown }
+    | undefined;
+  const rawId = raw?.context?.open_message_id ?? raw?.open_message_id;
+  return typeof rawId === 'string' && rawId.trim() ? rawId : deps.evt.messageId;
+}
+
+async function updateApprovalCard(
+  channel: LarkChannel,
+  messageId: string,
+  card: object,
+): Promise<void> {
+  try {
+    await channel.updateCard(messageId, card);
+    log.info('approval', 'card-update-ok', { messageId });
+  } catch (err) {
+    log.warn('approval', 'card-update-failed', {
+      messageId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+function syntheticApprovalMessage(
+  deps: CardDispatchDeps,
+  threadId: string | undefined,
+  command: string,
+  decision: 'allowed' | 'denied',
+  result?: string,
+): NormalizedMessage {
+  const content = [
+    '<approved_shell_execution>',
+    `decision: ${decision}`,
+    `command: ${command}`,
+    result ? `result:\n${result}` : '',
+    '</approved_shell_execution>',
+    '',
+    decision === 'allowed'
+      ? 'The bridge executed the approved command outside the Codex sandbox. Continue from this result.'
+      : 'The user denied sandbox escape for this command. Continue without running it.',
+  ].filter(Boolean).join('\n');
+
+  return {
+    messageId: deps.evt.messageId,
+    chatId: deps.evt.chatId,
+    chatType: 'p2p',
+    threadId,
+    senderId: deps.evt.operator.openId,
+    senderName: deps.evt.operator.name,
+    content,
+    rawContentType: 'approval_action',
+    resources: [],
+    mentions: [],
+    mentionAll: false,
+    mentionedBot: false,
+    createTime: Date.now(),
+  };
 }
 
 async function resolveScope(

@@ -38,6 +38,107 @@ describe('translateCodexEvent', () => {
     ]);
   });
 
+  it('preserves command working directories for host approval replay', () => {
+    expect([...translateCodexEvent({
+      type: 'item.started',
+      item: {
+        id: 'cmd-cwd',
+        type: 'command_execution',
+        command: './venv311/bin/python -m src.main',
+        workdir: '/Users/bytedance/Documents/trae_projects/llm_trading',
+      },
+    })]).toEqual([
+      {
+        type: 'tool_use',
+        id: 'cmd-cwd',
+        name: 'command',
+        input: {
+          command: './venv311/bin/python -m src.main',
+          cwd: '/Users/bytedance/Documents/trae_projects/llm_trading',
+        },
+        cwd: '/Users/bytedance/Documents/trae_projects/llm_trading',
+      },
+    ]);
+
+    expect([...translateCodexEvent({
+      type: 'item.completed',
+      item: {
+        id: 'cmd-cwd',
+        type: 'command_execution',
+        output: 'operation not permitted',
+        status: 'failed',
+        input: JSON.stringify({
+          cwd: '/Users/bytedance/Documents/trae_projects/llm_trading',
+        }),
+      },
+    })]).toEqual([
+      {
+        type: 'tool_result',
+        id: 'cmd-cwd',
+        output: 'operation not permitted',
+        isError: true,
+        cwd: '/Users/bytedance/Documents/trae_projects/llm_trading',
+      },
+    ]);
+  });
+
+  it('translates Codex function call events with workdir from tool arguments', () => {
+    expect([...translateCodexEvent({
+      type: 'response_item',
+      payload: {
+        type: 'function_call',
+        name: 'exec_command',
+        call_id: 'call-1',
+        arguments: JSON.stringify({
+          cmd: 'python -m src.main --portfolio multi_account_portfolio.json --account-id growth',
+          workdir: '/Users/bytedance/Documents/trae_projects/llm_trading',
+        }),
+      },
+    })]).toEqual([
+      {
+        type: 'tool_use',
+        id: 'call-1',
+        name: 'exec_command',
+        input: {
+          command: 'python -m src.main --portfolio multi_account_portfolio.json --account-id growth',
+          cwd: '/Users/bytedance/Documents/trae_projects/llm_trading',
+        },
+        cwd: '/Users/bytedance/Documents/trae_projects/llm_trading',
+      },
+    ]);
+
+    expect([...translateCodexEvent({
+      type: 'response_item',
+      payload: {
+        type: 'function_call_output',
+        call_id: 'call-1',
+        output: 'Process exited with code 1\nOutput:\nFailed to resolve api.waditu.com',
+      },
+    })]).toEqual([
+      {
+        type: 'tool_result',
+        id: 'call-1',
+        output: 'Process exited with code 1\nOutput:\nFailed to resolve api.waditu.com',
+        isError: true,
+      },
+    ]);
+  });
+
+  it('treats non-zero command exits as tool errors and preserves aggregated output', () => {
+    expect([...translateCodexEvent({
+      type: 'item.completed',
+      item: {
+        id: 'cmd-2',
+        type: 'command_execution',
+        aggregated_output: 'operation not permitted',
+        exit_code: 1,
+        status: 'completed',
+      },
+    })]).toEqual([
+      { type: 'tool_result', id: 'cmd-2', output: 'operation not permitted', isError: true },
+    ]);
+  });
+
   it('preserves Codex top-level error messages', () => {
     expect([...translateCodexEvent({
       type: 'error',

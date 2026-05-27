@@ -172,12 +172,25 @@ lark-codex-bridge unregister
 | `FEISHU_CODEX_BRIDGE_PROXY` | Windows helper 脚本使用的可选代理。 |
 | `HTTP_PROXY` / `HTTPS_PROXY` | Node 和 Codex 子进程继承的可选网络代理。 |
 
+### 跳出沙箱确认
+
+当 `/config` 里的 `Codex 文件权限` 设为 `acceptEdits` 时，Codex 会以
+`workspace-write` 运行：可以修改当前 workspace，但写 workspace 外路径仍会被
+Codex 沙箱拦住。如果某条 shell 命令因为类似沙箱/权限原因失败，bridge 会在同一
+会话发送一张确认卡。
+
+只有 `/config` 管理员可以点击 **允许本次**。确认后，bridge 会在宿主机上跳出
+Codex 沙箱执行那条失败的原始 shell 命令，并把 stdout/stderr 作为后续消息回灌给
+同一个 Codex session。宿主机执行默认 30 分钟超时。确认只对本次有效，保存在
+内存里；bridge 重启后失效。
+
 ## 安全提示
 
 - 不要提交 App Secret、Codex 登录态、cookie 或 `~/.feishu-codex-bridge`。
 - 把 `FEISHU_CODEX_WORKSPACE_ROOT` 设成 bot 真正需要访问的最小目录。
 - 邀请 bot 进共享群前，先在 `/config` 里设置管理员。
 - 群聊默认要求 @ bot，除非明确需要，否则不要关闭。
+- 把跳出沙箱确认视为本机 shell 权限；只在可信会话里批准你能识别的命令。
 - `/doctor` 会先清洗日志再交给 Codex，但日志仍可能包含运行元数据；只在可信会话里使用。
 
 ## 开发

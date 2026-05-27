@@ -4,6 +4,8 @@ import type {
   NormalizedMessage,
 } from '@larksuiteoapi/node-sdk';
 import { Domain, LoggerLevel, createLarkChannel } from '@larksuiteoapi/node-sdk';
+import { approvalRequestCard } from '../approval/card';
+import { createApproval } from '../approval/store';
 import type { AgentAdapter } from '../agent/types';
 import { handleCardAction } from '../card/dispatcher';
 import { renderCard } from '../card/run-renderer';
@@ -200,6 +202,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           workspaces,
           activeRuns,
           media,
+          pending,
           batch,
           controls,
           scope,
@@ -436,6 +439,7 @@ interface RunBatchDeps {
   workspaces: WorkspaceStore;
   activeRuns: ActiveRuns;
   media: MediaCache;
+  pending: PendingQueue;
   batch: NormalizedMessage[];
   controls: Controls;
   scope: string;
@@ -450,6 +454,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     workspaces,
     activeRuns,
     media,
+    pending,
     batch,
     controls,
     scope,
@@ -571,6 +576,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             producer: async (ctrl) => {
               await processAgentStream(handle, sessions, scope, cwd, idleTimeoutMs, async (state) => {
                 await ctrl.update(renderCard(filterForPrefs(state)));
+              }, {
+                channel,
+                pending,
+                chatId,
+                threadId,
+                replyToMessageId: lastMsg.messageId,
+                sendOpts,
               });
             },
           },
@@ -584,6 +596,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           markdown: async (ctrl) => {
             await processAgentStream(handle, sessions, scope, cwd, idleTimeoutMs, async (state) => {
               await ctrl.setContent(renderText(filterForPrefs(state)));
+            }, {
+              channel,
+              pending,
+              chatId,
+              threadId,
+              replyToMessageId: lastMsg.messageId,
+              sendOpts,
             });
           },
         },
@@ -596,6 +615,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       let finalState: RunState = initialState;
       await processAgentStream(handle, sessions, scope, cwd, idleTimeoutMs, async (state) => {
         finalState = state;
+      }, {
+        channel,
+        pending,
+        chatId,
+        threadId,
+        replyToMessageId: lastMsg.messageId,
+        sendOpts,
       });
       const body = renderText(filterForPrefs(finalState));
       if (body.trim()) {
@@ -624,6 +650,7 @@ async function processAgentStream(
   cwd: string,
   idleTimeoutMs: number | undefined,
   flush: (state: RunState) => Promise<void>,
+  approvalDeps?: ApprovalStreamDeps,
 ): Promise<void> {
   let state: RunState = initialState;
 
@@ -644,6 +671,10 @@ async function processAgentStream(
   let idleFired = false;
   let timer: NodeJS.Timeout | undefined;
   const inFlightTools = new Set<string>();
+  const toolCommands = new Map<string, string>();
+  const toolCwds = new Map<string, string>();
+  const approvalRequestedFor = new Set<string>();
+  const approvalRequestedForKeys = new Set<string>();
   const armOrPauseIdle = (): void => {
     if (!idleTimeoutMs) return;
     if (timer) clearTimeout(timer);
@@ -669,13 +700,34 @@ async function processAgentStream(
       // closes it. Other event types are bookkept after the if/else.
       if (evt.type === 'tool_use') {
         inFlightTools.add(evt.id);
+        const command = commandFromToolInput(evt.input);
+        if (command) toolCommands.set(evt.id, command);
+        const toolCwd = evt.cwd ?? cwdFromToolInput(evt.input);
+        if (toolCwd) toolCwds.set(evt.id, toolCwd);
         log.info('agent', 'tool-in-flight', {
           tool: evt.name,
           inFlight: inFlightTools.size,
+          ...(toolCwd ? { cwd: toolCwd } : {}),
         });
       } else if (evt.type === 'tool_result') {
         inFlightTools.delete(evt.id);
         log.info('agent', 'tool-done', { inFlight: inFlightTools.size });
+        const command = toolCommands.get(evt.id);
+        const toolCwd = evt.cwd ?? toolCwds.get(evt.id) ?? cwd;
+        if (
+          approvalDeps &&
+          command &&
+          evt.isError &&
+          !approvalRequestedFor.has(evt.id) &&
+          looksLikeSandboxOrNetworkDenial(evt.output)
+        ) {
+          const approvalKey = approvalRequestKey(toolCwd, command);
+          if (!approvalRequestedForKeys.has(approvalKey)) {
+            approvalRequestedFor.add(evt.id);
+            approvalRequestedForKeys.add(approvalKey);
+            await requestSandboxApproval(approvalDeps, scope, toolCwd, command, evt.output);
+          }
+        }
       }
       armOrPauseIdle();
 
@@ -742,6 +794,104 @@ async function processAgentStream(
   }
 }
 
+interface ApprovalStreamDeps {
+  channel: LarkChannel;
+  pending: PendingQueue;
+  chatId: string;
+  threadId: string | undefined;
+  replyToMessageId: string;
+  sendOpts: Record<string, unknown>;
+}
+
+function commandFromToolInput(input: unknown): string | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const command = (input as { command?: unknown }).command;
+  return typeof command === 'string' && command.trim() ? command : undefined;
+}
+
+function cwdFromToolInput(input: unknown): string | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const record = input as { cwd?: unknown; workdir?: unknown; working_directory?: unknown };
+  for (const value of [record.cwd, record.workdir, record.working_directory]) {
+    if (typeof value === 'string' && value.trim()) return value;
+  }
+  return undefined;
+}
+
+function looksLikeSandboxOrNetworkDenial(output: string): boolean {
+  const text = output.toLowerCase();
+  return [
+    'operation not permitted',
+    'permission denied',
+    'read-only file system',
+    'readonly file system',
+    'sandbox',
+    'not permitted by sandbox',
+    'failed to resolve',
+    'could not resolve host',
+    'temporary failure in name resolution',
+    'nodename nor servname provided',
+    'name or service not known',
+    'network is unreachable',
+    'network access is disabled',
+    'connection refused',
+    'connection timed out',
+    'getaddrinfo enotfound',
+  ].some((needle) => text.includes(needle));
+}
+
+function approvalRequestKey(cwd: string, command: string): string {
+  return `${cwd}\0${unwrapShellCommand(command)}`;
+}
+
+function unwrapShellCommand(command: string): string {
+  const trimmed = command.trim();
+  const match = trimmed.match(/^\/bin\/(?:zsh|bash|sh)\s+-lc\s+'([\s\S]*)'$/);
+  if (!match?.[1]) return trimmed;
+  return match[1].replace(/'\\''/g, "'");
+}
+
+async function requestSandboxApproval(
+  deps: ApprovalStreamDeps,
+  scope: string,
+  cwd: string,
+  command: string,
+  output: string,
+): Promise<void> {
+  const approval = createApproval({
+    scope,
+    chatId: deps.chatId,
+    threadId: deps.threadId,
+    messageId: deps.replyToMessageId,
+    command,
+    cwd,
+    reason: summarizeApprovalReason(output),
+  });
+  log.warn('approval', 'request', {
+    scope,
+    approvalId: approval.id,
+    cwd,
+    command: command.slice(0, 300),
+  });
+  const sent = await deps.channel.send(
+    deps.chatId,
+    { card: approvalRequestCard(approval) },
+    deps.sendOpts,
+  );
+  approval.messageId = sent.messageId;
+  log.info('approval', 'card-sent', {
+    approvalId: approval.id,
+    messageId: approval.messageId,
+    replyToMessageId: deps.replyToMessageId,
+  });
+}
+
+function summarizeApprovalReason(output: string): string {
+  const trimmed = output.trim().replace(/\s+/g, ' ');
+  if (!trimmed) return 'sandbox denied the command';
+  return trimmed.length > 300 ? `${trimmed.slice(0, 300)}...` : trimmed;
+}
+
 /**
  * How long to wait for Codex to close stdout after a terminal event before
  * forcing a SIGTERM. Empirically Codex's post-`result` tail is well under a
@@ -776,10 +926,12 @@ function buildPrompt(
     .filter(Boolean);
   const ctxHeader = buildBridgeContextHeader(batch);
   const quoteBlock = renderQuotedBlock(quotes);
+  const executionIntent = renderExecutionIntentBlock(texts, quotes);
 
   // Order: <bridge_context> (metadata) → <quoted_message>(s) (what user is
-  // pointing at) → user text + attachments (what they're asking).
-  const prefixParts = [ctxHeader, quoteBlock].filter(Boolean);
+  // pointing at) → bridge execution hints → user text + attachments (what
+  // they're asking).
+  const prefixParts = [ctxHeader, quoteBlock, executionIntent].filter(Boolean);
   const prefix = prefixParts.length > 0 ? `${prefixParts.join('\n\n')}\n\n` : '';
 
   if (attachments.length === 0) {
@@ -800,6 +952,23 @@ function buildPrompt(
   });
   const userPart = texts.length > 0 ? texts.join('\n\n') : '请看下面的附件。';
   return `${prefix}${userPart}\n\n附件（本地路径）：\n${attachLines.join('\n')}`;
+}
+
+function renderExecutionIntentBlock(texts: string[], quotes: QuotedContext[]): string {
+  const combined = [...texts, ...quotes.map((q) => q.content)].join('\n');
+  if (!looksLikeExplicitSandboxExecutionIntent(combined)) return '';
+  return [
+    '<bridge_execution_intent>',
+    'The user is explicitly asking to execute a command outside the Codex sandbox.',
+    'Do not answer only with instructions or claim that approval was requested.',
+    'First identify the intended shell command from the current message, quoted message, and current cwd context, then call the command tool in the current cwd.',
+    'If that sandboxed command fails because of filesystem or network restrictions, the bridge will automatically send the approval card and run the same command on the host after the user confirms.',
+    '</bridge_execution_intent>',
+  ].join('\n');
+}
+
+function looksLikeExplicitSandboxExecutionIntent(input: string): boolean {
+  return /(?:跳出|脱离|绕过|越过).{0,12}沙箱.{0,24}(?:执行|运行|请求|申请)|(?:执行|运行).{0,24}(?:沙箱外|外部执行器|宿主机)|(?:请求|申请).{0,12}(?:跳出|脱离|绕过|越过).{0,12}沙箱/.test(input);
 }
 
 function buildBridgeContextHeader(batch: NormalizedMessage[]): string {
@@ -826,4 +995,3 @@ function stripAttachmentRefs(text: string, fileKeys: string[]): string {
   }
   return out.replace(/\n{3,}/g, '\n\n');
 }
-

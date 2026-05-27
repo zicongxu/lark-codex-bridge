@@ -1,4 +1,4 @@
-import { isAbsolute, normalize, resolve } from 'node:path';
+import { isAbsolute, normalize, resolve, sep } from 'node:path';
 
 export function workspaceRoot(): string {
   return normalize(process.env.FEISHU_CODEX_WORKSPACE_ROOT ?? process.cwd());
@@ -15,7 +15,7 @@ export function isInsideWorkspaceRoot(path: string, root = workspaceRoot()): boo
   const normalizedRoot = normalize(root);
   const rootWithSep = normalizedRoot.endsWith('\\') || normalizedRoot.endsWith('/')
     ? normalizedRoot
-    : `${normalizedRoot}\\`;
+    : `${normalizedRoot}${sep}`;
   const lowerPath = normalizedPath.toLowerCase();
   const lowerRoot = normalizedRoot.toLowerCase();
   const lowerRootWithSep = rootWithSep.toLowerCase();
